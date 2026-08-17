@@ -6,7 +6,7 @@ export const NETWORK_FILE_NAMES = ["2G", "3G", "4G"];
 export const OUTPUT_FILE_NAME = "2, 3, 4 G cell_naming.xlsx";
 
 // Allowed upload extensions.
-const EXCEL_EXTENSIONS = ["xlsx", "xls"];
+const EXCEL_EXTENSIONS = ["xlsx", "xls", "csv"];
 // Replacement value used for `Site Name` in each network tab.
 const NETWORK_SITE_NAME_REPLACEMENT = {
   "2G": "G",
@@ -23,9 +23,13 @@ const OUTPUT_COLUMNS = [
   "Longitude",
   "Latitude",
   "Azimuth",
+  "M.Tilt",
   "Tower Type",
   "Tower Height",
 ];
+
+// 2G naming suffixes: 1 through 7, skipping 4.
+const TWO_G_SUFFIXES = ["1", "2", "3", "5", "6", "7"];
 
 // 4G naming suffix sets.
 // - Base set for normal bandwidth rows.
@@ -42,6 +46,11 @@ const FOUR_G_SUFFIXES_BASE = [
   "C3",
 ];
 const FOUR_G_SUFFIXES_EXTENDED = [...FOUR_G_SUFFIXES_BASE, "B4", "B5", "B6"];
+
+// 4G suffix groups tied to a band column. When that band is not deployed on a
+// site, its suffixes are dropped from that site's 4G rows.
+const FOUR_G_SUFFIXES_L1800 = ["A1", "A2", "A3"];
+const FOUR_G_SUFFIXES_L2100 = ["C1", "C2", "C3"];
 
 // Normalizes header names so we can match columns even if formatting differs
 // (spaces, case, symbols).
@@ -87,7 +96,10 @@ function buildColumnMap(columns) {
       "Tower height",
       "Tower hight",
     ]),
+    mTilt: resolveColumnName(columns, ["M.Tilt", "MTilt", "M Tilt", "M.tilt"]),
     l800bw: resolveColumnName(columns, ["L800 BW", "L800BW", "L800 Bw"]),
+    l1800bw: resolveColumnName(columns, ["L1800 BW", "L1800BW", "L1800 Bw"]),
+    l2100bw: resolveColumnName(columns, ["L2100 BW", "L2100BW", "L2100 Bw"]),
   };
 }
 
@@ -100,9 +112,12 @@ function getMissingColumns(columnMap) {
     ["longitude", "Longitude/LON"],
     ["latitude", "Latitude/LAT"],
     ["azimuth", "Azimuth"],
+    ["mTilt", "M.Tilt"],
     ["towerType", "Tower Type"],
     ["towerHeight", "Tower Height"],
     ["l800bw", "L800 BW"],
+    ["l1800bw", "L1800 BW"],
+    ["l2100bw", "L2100 BW"],
   ];
 
   return required
@@ -128,6 +143,34 @@ function hasThirtyMhzL800(value) {
   return String(value).toLowerCase().includes("30 mhz");
 }
 
+// A band is treated as not deployed when its bandwidth cell is blank or `-`.
+function isBandMissing(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized === "" || normalized === "-";
+}
+
+// Picks the 4G suffixes for one site:
+// - `L800 BW` of `30 MHz` adds B4/B5/B6.
+// - Missing `L1800 BW` drops A1/A2/A3.
+// - Missing `L2100 BW` drops C1/C2/C3.
+function getFourGSuffixes(sourceRow, columnMap) {
+  const baseSuffixes = hasThirtyMhzL800(sourceRow[columnMap.l800bw])
+    ? FOUR_G_SUFFIXES_EXTENDED
+    : FOUR_G_SUFFIXES_BASE;
+
+  const excluded = new Set();
+
+  if (isBandMissing(sourceRow[columnMap.l1800bw])) {
+    FOUR_G_SUFFIXES_L1800.forEach((suffix) => excluded.add(suffix));
+  }
+
+  if (isBandMissing(sourceRow[columnMap.l2100bw])) {
+    FOUR_G_SUFFIXES_L2100.forEach((suffix) => excluded.add(suffix));
+  }
+
+  return baseSuffixes.filter((suffix) => !excluded.has(suffix));
+}
+
 // Builds one output row.
 // `cellName` is unique per duplicated row (with suffix).
 // `siteName` is the modified base value without the duplication suffix.
@@ -142,6 +185,7 @@ function createOutputRow(sourceRow, columnMap, cellName, siteName) {
     Longitude: sourceRow[columnMap.longitude] ?? "",
     Latitude: sourceRow[columnMap.latitude] ?? "",
     Azimuth: sourceRow[columnMap.azimuth] ?? "",
+    "M.Tilt": sourceRow[columnMap.mTilt] ?? "",
     "Tower Type": sourceRow[columnMap.towerType] ?? "",
     "Tower Height": sourceRow[columnMap.towerHeight] ?? "",
   };
@@ -249,16 +293,16 @@ export async function createWorkbookWithNetworkTabs(sourceFile) {
       const baseCellName = buildCellBaseName(siteName, networkName);
 
       if (networkName === "2G") {
-        for (let counter = 1; counter <= 7; counter += 1) {
+        TWO_G_SUFFIXES.forEach((suffix) => {
           networkRows.push(
             createOutputRow(
               row,
               columnMap,
-              `${baseCellName}-${counter}`,
+              `${baseCellName}-${suffix}`,
               baseCellName,
             ),
           );
-        }
+        });
 
         return;
       }
@@ -278,9 +322,7 @@ export async function createWorkbookWithNetworkTabs(sourceFile) {
         return;
       }
 
-      const suffixes = hasThirtyMhzL800(row[columnMap.l800bw])
-        ? FOUR_G_SUFFIXES_EXTENDED
-        : FOUR_G_SUFFIXES_BASE;
+      const suffixes = getFourGSuffixes(row, columnMap);
 
       suffixes.forEach((suffix) => {
         networkRows.push(
