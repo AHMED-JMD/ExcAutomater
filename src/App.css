@@ -94,6 +94,34 @@ input[type="file"] {
   margin-bottom: 12px;
 }
 
+.sheet-picker {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  text-align: left;
+}
+
+.sheet-picker label {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.sheet-picker select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.sheet-hint {
+  font-size: 13px;
+  opacity: 0.85;
+}
+
 .actions {
   display: flex;
   gap: 10px;

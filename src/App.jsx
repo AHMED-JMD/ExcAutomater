@@ -6,7 +6,11 @@ import "./App.css";
 function App() {
   const {
     selectedFile,
-    setSelectedFile,
+    selectFile,
+    sheets,
+    selectedSheet,
+    setSelectedSheet,
+    isReadingSheets,
     downloads,
     errorMessage,
     isProcessing,
@@ -26,7 +30,11 @@ function App() {
       <section className="grid">
         <UploadPanel
           selectedFile={selectedFile}
-          onFileSelect={setSelectedFile}
+          onFileSelect={selectFile}
+          sheets={sheets}
+          selectedSheet={selectedSheet}
+          onSheetSelect={setSelectedSheet}
+          isReadingSheets={isReadingSheets}
           onGenerate={generateFiles}
           onReset={resetAll}
           isProcessing={isProcessing}

@@ -395,14 +395,43 @@ export function formatFileSize(bytes = 0) {
   return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+// Reads one worksheet into rows.
+function readSheetRows(workbook, sheetName) {
+  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+    raw: true,
+    defval: "",
+  });
+}
+
+// Lists every worksheet in an uploaded file with the columns it is missing, so
+// the UI can let the user pick the sheet that actually holds the site data
+// (workbooks often lead with a summary or index sheet).
+export async function listWorkbookSheets(sourceFile) {
+  const buffer = await sourceFile.arrayBuffer();
+  const sourceWorkbook = XLSX.read(buffer, { type: "array" });
+
+  return sourceWorkbook.SheetNames.map((sheetName) => {
+    const rows = readSheetRows(sourceWorkbook, sheetName);
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+    const missingColumns = getMissingColumns(buildColumnMap(columns));
+
+    return {
+      name: sheetName,
+      rowCount: rows.length,
+      missingColumns,
+      isUsable: rows.length > 0 && missingColumns.length === 0,
+    };
+  });
+}
+
 // Main transformation pipeline:
 // 1) Read uploaded workbook.
-// 2) Extract first sheet rows.
+// 2) Extract rows from the chosen sheet (defaults to the first one).
 // 3) Validate required columns.
 // 4) Deduplicate by Region + Site Code.
 // 5) Create 2G/3G/4G sheets with Site Name replacement rules.
 // 6) Return one downloadable workbook file.
-export async function createWorkbookWithNetworkTabs(sourceFile) {
+export async function createWorkbookWithNetworkTabs(sourceFile, sheetName = "") {
   const buffer = await sourceFile.arrayBuffer();
   const sourceWorkbook = XLSX.read(buffer, { type: "array" });
   const [firstSheetName] = sourceWorkbook.SheetNames;
@@ -411,11 +440,18 @@ export async function createWorkbookWithNetworkTabs(sourceFile) {
     throw new Error("No worksheet found in the uploaded file.");
   }
 
-  const sourceSheet = sourceWorkbook.Sheets[firstSheetName];
-  const rows = XLSX.utils.sheet_to_json(sourceSheet, { raw: true, defval: "" });
+  const targetSheetName = sheetName || firstSheetName;
+
+  if (!sourceWorkbook.Sheets[targetSheetName]) {
+    throw new Error(
+      `Worksheet "${targetSheetName}" was not found in the uploaded file.`,
+    );
+  }
+
+  const rows = readSheetRows(sourceWorkbook, targetSheetName);
 
   if (rows.length === 0) {
-    throw new Error("The uploaded worksheet is empty.");
+    throw new Error(`Worksheet "${targetSheetName}" is empty.`);
   }
 
   const columns = Object.keys(rows[0]);
@@ -423,7 +459,9 @@ export async function createWorkbookWithNetworkTabs(sourceFile) {
   const missingColumns = getMissingColumns(columnMap);
 
   if (missingColumns.length > 0) {
-    throw new Error(`Missing required columns: ${missingColumns.join(", ")}.`);
+    throw new Error(
+      `Worksheet "${targetSheetName}" is missing required columns: ${missingColumns.join(", ")}.`,
+    );
   }
 
   const uniqueRows = getUniqueRowsByRegionAndSiteCode(rows, columnMap);
