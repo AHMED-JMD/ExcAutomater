@@ -24,12 +24,23 @@ const OUTPUT_COLUMNS = [
   "Latitude",
   "Azimuth",
   "M.Tilt",
+  "TRX Number",
   "Tower Type",
   "Tower Height",
 ];
 
+// Number of sectors per site. Per-sector source columns (such as `Azimuth`)
+// hold one value per sector, and generated cells cycle through them in order.
+const SECTOR_COUNT = 3;
+
 // 2G naming suffixes: 1 through 7, skipping 4.
+// Positions 0-2 are the first TRX group of sectors 1-3, positions 3-5 are the
+// second TRX group of the same sectors.
 const TWO_G_SUFFIXES = ["1", "2", "3", "5", "6", "7"];
+
+// 3G naming suffixes: 1 through 6.
+// Positions 0-2 are the first carrier of sectors 1-3, positions 3-5 the second.
+const THREE_G_SUFFIXES = ["1", "2", "3", "4", "5", "6"];
 
 // 4G naming suffix sets.
 // - Base set for normal bandwidth rows.
@@ -100,6 +111,8 @@ function buildColumnMap(columns) {
     l800bw: resolveColumnName(columns, ["L800 BW", "L800BW", "L800 Bw"]),
     l1800bw: resolveColumnName(columns, ["L1800 BW", "L1800BW", "L1800 Bw"]),
     l2100bw: resolveColumnName(columns, ["L2100 BW", "L2100BW", "L2100 Bw"]),
+    twoGConfig: resolveColumnName(columns, ["2G Config", "2G Configuration"]),
+    threeGConfig: resolveColumnName(columns, ["3G Config", "3G Configuration"]),
   };
 }
 
@@ -118,6 +131,8 @@ function getMissingColumns(columnMap) {
     ["l800bw", "L800 BW"],
     ["l1800bw", "L1800 BW"],
     ["l2100bw", "L2100 BW"],
+    ["twoGConfig", "2G Config"],
+    ["threeGConfig", "3G Config"],
   ];
 
   return required
@@ -171,10 +186,139 @@ function getFourGSuffixes(sourceRow, columnMap) {
   return baseSuffixes.filter((suffix) => !excluded.has(suffix));
 }
 
+// Per-sector source values hold one entry per sector, separated by `/` or `,`
+// (for example `115/185/255`). Returns null when the value is not a full set,
+// so the caller can fall back to the raw cell value.
+function splitSectorValues(value) {
+  const parts = String(value ?? "")
+    .split(/[/,]/)
+    .map((part) => part.trim());
+
+  return parts.length === SECTOR_COUNT ? parts : null;
+}
+
+// Picks the sector value matching a cell's position in its suffix list.
+// Cells cycle through the sectors: positions 0,1,2 map to sectors 1,2,3, then
+// position 3 starts over at sector 1.
+function getSectorValue(value, sectorIndex) {
+  const parts = splitSectorValues(value);
+
+  if (!parts) {
+    return value ?? "";
+  }
+
+  return parts[sectorIndex % SECTOR_COUNT];
+}
+
+// Parses a config cell into groups of per-sector values.
+// Handles the shapes used in the source sheets:
+//   `S5/5/5 0/0/0` and `6/6/6 0/0/0` -> [["5","5","5"], ["0","0","0"]]
+//   `S555/000`                       -> [["5","5","5"], ["0","0","0"]]
+//   `S222` and `S2/2/2`              -> [["2","2","2"]]
+// Returns an empty list when the cell holds no usable config (blank or `-`).
+function parseConfigGroups(value) {
+  const cleaned = String(value ?? "")
+    .trim()
+    .replace(/^s\s*/i, "")
+    .trim();
+
+  if (cleaned === "" || cleaned === "-") {
+    return [];
+  }
+
+  const parts = cleaned.split(/[\s/]+/).filter(Boolean);
+
+  // Compact form: each part already holds one value per sector (`555`).
+  if (parts.every((part) => /^\d{3}$/.test(part))) {
+    return parts.map((part) => part.split(""));
+  }
+
+  // Expanded form: one value per part, grouped in sector-sized chunks.
+  const groups = [];
+
+  for (let index = 0; index < parts.length; index += SECTOR_COUNT) {
+    const group = parts.slice(index, index + SECTOR_COUNT);
+
+    if (group.length === SECTOR_COUNT) {
+      groups.push(group);
+    }
+  }
+
+  return groups;
+}
+
+// Builds the 2G cell list for one site from `2G Config`.
+// Cells 1-3 take their TRX count from the first config group and cells 5-7 from
+// the second, so a second group of zeros drops 5, 6 and 7.
+function getTwoGCells(sourceRow, columnMap) {
+  const groups = parseConfigGroups(sourceRow[columnMap.twoGConfig]);
+
+  return TWO_G_SUFFIXES.map((suffix, index) => {
+    const sectorIndex = index % SECTOR_COUNT;
+    const group = groups[Math.floor(index / SECTOR_COUNT)] ?? [];
+
+    return { suffix, sectorIndex, trxNumber: group[sectorIndex] ?? "" };
+  }).filter((cell) => Number(cell.trxNumber) > 0);
+}
+
+// Builds the 3G cell list for one site from `3G Config`.
+// The config holds the carrier count per sector, so `2/2/2` yields cells 1-6
+// and `1/1/1` only cells 1-3. A sector with 0 carriers gets no cell at all.
+function getThreeGCells(sourceRow, columnMap) {
+  const [carriersPerSector = []] = parseConfigGroups(
+    sourceRow[columnMap.threeGConfig],
+  );
+
+  return THREE_G_SUFFIXES.map((suffix, index) => {
+    const sectorIndex = index % SECTOR_COUNT;
+    const carrierNumber = Math.floor(index / SECTOR_COUNT) + 1;
+    const sectorCarriers = carriersPerSector[sectorIndex] ?? "";
+
+    return {
+      suffix,
+      sectorIndex,
+      trxNumber: sectorCarriers,
+      hasCarrier: Number(sectorCarriers) >= carrierNumber,
+    };
+  }).filter((cell) => cell.hasCarrier);
+}
+
+// Builds the 4G cell list for one site. 4G has no config column, so `TRX
+// Number` stays empty and only the band rules apply.
+function getFourGCells(sourceRow, columnMap) {
+  return getFourGSuffixes(sourceRow, columnMap).map((suffix, index) => ({
+    suffix,
+    sectorIndex: index % SECTOR_COUNT,
+    trxNumber: "",
+  }));
+}
+
+// Returns the cells to generate for one site on one network.
+function getNetworkCells(networkName, sourceRow, columnMap) {
+  if (networkName === "2G") {
+    return getTwoGCells(sourceRow, columnMap);
+  }
+
+  if (networkName === "3G") {
+    return getThreeGCells(sourceRow, columnMap);
+  }
+
+  return getFourGCells(sourceRow, columnMap);
+}
+
 // Builds one output row.
 // `cellName` is unique per duplicated row (with suffix).
 // `siteName` is the modified base value without the duplication suffix.
-function createOutputRow(sourceRow, columnMap, cellName, siteName) {
+// `sectorIndex` is the cell's position in its network suffix list, used to pick
+// the matching per-sector values.
+function createOutputRow(
+  sourceRow,
+  columnMap,
+  cellName,
+  siteName,
+  sectorIndex,
+  trxNumber,
+) {
   const normalizedSiteName = String(siteName ?? "");
 
   return {
@@ -184,8 +328,9 @@ function createOutputRow(sourceRow, columnMap, cellName, siteName) {
     "Site Id": extractSiteIdFromSiteName(normalizedSiteName),
     Longitude: sourceRow[columnMap.longitude] ?? "",
     Latitude: sourceRow[columnMap.latitude] ?? "",
-    Azimuth: sourceRow[columnMap.azimuth] ?? "",
-    "M.Tilt": sourceRow[columnMap.mTilt] ?? "",
+    Azimuth: getSectorValue(sourceRow[columnMap.azimuth], sectorIndex),
+    "M.Tilt": getSectorValue(sourceRow[columnMap.mTilt], sectorIndex),
+    "TRX Number": trxNumber ?? "",
     "Tower Type": sourceRow[columnMap.towerType] ?? "",
     "Tower Height": sourceRow[columnMap.towerHeight] ?? "",
   };
@@ -292,45 +437,17 @@ export async function createWorkbookWithNetworkTabs(sourceFile) {
       const siteName = String(row[columnMap.siteName] ?? "");
       const baseCellName = buildCellBaseName(siteName, networkName);
 
-      if (networkName === "2G") {
-        TWO_G_SUFFIXES.forEach((suffix) => {
-          networkRows.push(
-            createOutputRow(
-              row,
-              columnMap,
-              `${baseCellName}-${suffix}`,
-              baseCellName,
-            ),
-          );
-        });
+      const cells = getNetworkCells(networkName, row, columnMap);
 
-        return;
-      }
-
-      if (networkName === "3G") {
-        for (let counter = 1; counter <= 6; counter += 1) {
-          networkRows.push(
-            createOutputRow(
-              row,
-              columnMap,
-              `${baseCellName}-${counter}`,
-              baseCellName,
-            ),
-          );
-        }
-
-        return;
-      }
-
-      const suffixes = getFourGSuffixes(row, columnMap);
-
-      suffixes.forEach((suffix) => {
+      cells.forEach(({ suffix, sectorIndex, trxNumber }) => {
         networkRows.push(
           createOutputRow(
             row,
             columnMap,
             `${baseCellName}-${suffix}`,
             baseCellName,
+            sectorIndex,
+            trxNumber,
           ),
         );
       });
